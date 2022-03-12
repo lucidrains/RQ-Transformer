@@ -37,11 +37,14 @@ loss.backward()
 logits = model(x)
 
 # and sample from the logits accordingly
+# or you can use the generate function
+
+sampled = model.generate(temperature = 0.9, filter_thres = 0.9) # (1, 1024, 4)
 ```
 
 ## Todo
 
-- [ ] take care of sampling with generate method
+- [x] take care of sampling with generate method
 - [ ] extend to 3 nested dimensions, use separate class, name it `AxialAutoregressiveTransformer`
 
 ## Citations

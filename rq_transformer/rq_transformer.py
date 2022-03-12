@@ -14,6 +14,24 @@ def default(val, d):
 def remainder_to_mult(num, mult):
     return (mult - num % mult) % mult
 
+def log(t, eps = 1e-20):
+    return torch.log(t.clamp(min = eps))
+
+def gumbel_noise(t):
+    noise = torch.zeros_like(t).uniform_(0, 1)
+    return -log(-log(noise))
+
+def gumbel_sample(t, temperature = 1., dim = -1):
+    return ((t / temperature) + gumbel_noise(t)).argmax(dim = dim)
+
+def top_k(logits, thres = 0.5):
+    num_logits = logits.shape[-1]
+    k = max(int((1 - thres) * num_logits), 1)
+    val, ind = torch.topk(logits, k)
+    probs = torch.full_like(logits, float('-inf'))
+    probs.scatter_(1, ind, val)
+    return probs
+
 # helper classes
 
 def FeedForward(*, dim, mult = 4, dropout = 0.):
@@ -45,7 +63,7 @@ class Attention(nn.Module):
         self.to_out = nn.Linear(inner_dim, dim)
 
     def forward(self, x):
-        h = self.heads
+        h, device = self.heads, x.device
 
         x = self.norm(x)
         q, k, v = self.to_qkv(x).chunk(3, dim = -1)
@@ -56,7 +74,7 @@ class Attention(nn.Module):
 
         i, j = sim.shape[-2:]
         mask_value = -torch.finfo(sim.dtype).max
-        mask = torch.ones((i, j), dtype = torch.bool).triu(j - i + 1)
+        mask = torch.ones((i, j), dtype = torch.bool, device = device).triu(j - i + 1)
         sim = sim.masked_fill(mask, mask_value)
 
         sim = sim - sim.amax(dim = -1, keepdim = True).detach()
@@ -149,9 +167,38 @@ class RQTransformer(nn.Module):
         self.to_logits = nn.Linear(dim, num_tokens)
         self.pad_id = pad_id
 
+    def generate(self, prime = None, filter_thres = 0.9, temperature = 1.):
+        total_seq_len = self.depth_seq_len * self.max_spatial_seq_len
+        device = next(self.parameters()).device
+
+        if not exists(prime):
+            prime = torch.empty((1, 0), dtype = torch.long, device = device)
+
+        seq = prime
+
+        for _ in range(total_seq_len - seq.shape[-1]):
+            logits = self.forward(seq)[:, -1]
+            logits = top_k(logits, thres = filter_thres)
+            sampled = gumbel_sample(logits, dim = -1, temperature = temperature)
+            seq = torch.cat((seq, rearrange(sampled, 'b -> b 1')), dim = -1)
+
+        return rearrange(seq, 'b (s d) -> b s d', d = self.depth_seq_len)
+
+    def forward_empty(self, batch_size):
+        # take care of special case
+        # where you sample from input of 0 (start token only)
+
+        spatial_tokens = repeat(self.spatial_start_token, 'd -> b 1 d', b = batch_size)
+        depth_tokens = self.spatial_transformer(spatial_tokens)
+        depth_tokens = self.depth_transformer(depth_tokens)
+        return self.to_logits(depth_tokens)
+
     def forward(self, ids, return_loss = False):
         assert ids.ndim in {2, 3}
         ids_orig_ndim = ids.ndim
+
+        if ids.numel() == 0:
+            return self.forward_empty(ids.shape[0])
 
         if ids.ndim == 2:
             # allow for ids to be given in the shape of (batch, seq)
