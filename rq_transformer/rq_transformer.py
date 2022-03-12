@@ -11,8 +11,8 @@ def exists(val):
 def default(val, d):
     return val if exists(val) else d
 
-def check_shape(t, pattern, **kwargs):
-    return rearrange(t, f'{pattern} -> {pattern}', **kwargs)
+def remainder_to_mult(num, mult):
+    return (mult - num % mult) % mult
 
 # helper classes
 
@@ -105,7 +105,7 @@ class RQTransformer(nn.Module):
         num_tokens,
         dim,
         max_spatial_seq_len,
-        max_depth_seq_len,
+        depth_seq_len,
         spatial_layers,
         depth_layers,
         dim_head = 64,
@@ -118,13 +118,13 @@ class RQTransformer(nn.Module):
         super().__init__()
         self.dim = dim
         self.max_spatial_seq_len = max_spatial_seq_len
-        self.max_depth_seq_len = max_depth_seq_len
+        self.depth_seq_len = depth_seq_len
 
         self.token_emb = nn.Embedding(num_tokens, dim)
         self.spatial_start_token = nn.Parameter(torch.randn(dim))
 
         self.spatial_pos_emb = nn.Embedding(max_spatial_seq_len, dim)
-        self.depth_pos_emb = nn.Embedding(max_depth_seq_len, dim)
+        self.depth_pos_emb = nn.Embedding(depth_seq_len, dim)
 
         self.spatial_transformer = Transformer(
             dim = dim,
@@ -150,11 +150,20 @@ class RQTransformer(nn.Module):
         self.pad_id = pad_id
 
     def forward(self, ids, return_loss = False):
-        check_shape(ids, 'b s d') # b - batch, s - spatial dimension, d - depth dimension
+        assert ids.ndim in {2, 3}
+        ids_orig_ndim = ids.ndim
+
+        if ids.ndim == 2:
+            # allow for ids to be given in the shape of (batch, seq)
+            # in which case it will be auto-padded to the next nearest multiple of depth seq len
+            seq_len = ids.shape[-1]
+            padding = remainder_to_mult(seq_len, self.depth_seq_len)
+            ids = F.pad(ids, (0, padding), value = self.pad_id)
+            ids = rearrange(ids, 'b (s d) -> b s d', d = self.depth_seq_len)
 
         b, space, depth, device = *ids.shape, ids.device
         assert space <= self.max_spatial_seq_len, 'spatial dimension is greater than the max_spatial_seq_len set'
-        assert depth <= self.max_depth_seq_len, 'depth dimension is greater than the max_depth_seq_len set'
+        assert depth == self.depth_seq_len, 'depth dimension must be equal to depth_seq_len'
 
         tokens = self.token_emb(ids)
 
@@ -164,6 +173,7 @@ class RQTransformer(nn.Module):
         tokens_with_depth_pos = tokens + depth_pos
 
         # spatial tokens is tokens with depth pos reduced along depth dimension + spatial positions
+
         spatial_tokens = reduce(tokens_with_depth_pos, 'b s d f -> b s f', 'sum') + spatial_pos
 
         spatial_tokens = torch.cat((
@@ -189,13 +199,19 @@ class RQTransformer(nn.Module):
         depth_tokens = rearrange(depth_tokens, '(b s) d f -> b s d f', b = b)
         logits = self.to_logits(depth_tokens)
 
+        if ids_orig_ndim == 2:
+            logits = rearrange(logits, 'b ... n -> b (...) n')
+            logits = logits[:, :seq_len]
+
         if not return_loss:
             return logits
 
         assert self.training
 
-        preds = rearrange(logits, 'b s d c -> b c (s d)')
+        preds = rearrange(logits, 'b ... c -> b c (...)')
+
         labels = rearrange(ids, 'b s d -> b (s d)')
+        labels = labels[:, :preds.shape[-1]]
 
         loss = F.cross_entropy(preds, labels, ignore_index = self.pad_id)
         return loss
