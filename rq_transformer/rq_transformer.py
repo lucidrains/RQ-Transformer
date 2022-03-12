@@ -67,6 +67,35 @@ class Attention(nn.Module):
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 
+class Transformer(nn.Module):
+    def __init__(
+        self,
+        *,
+        dim,
+        layers,
+        dim_head = 64,
+        heads = 8,
+        attn_dropout = 0.,
+        ff_dropout = 0.,
+        ff_mult = 4
+    ):
+        super().__init__()
+        self.layers = nn.ModuleList([])
+        for _ in range(layers):
+            self.layers.append(nn.ModuleList([
+                Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = attn_dropout),
+                FeedForward(dim = dim, mult = ff_mult, dropout = ff_dropout)
+            ]))
+
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, x):
+        for attn, ff in self.layers:
+            x = attn(x) + x
+            x = ff(x) + x
+
+        return self.norm(x)
+
 # main class
 
 class RQTransformer(nn.Module):
@@ -97,19 +126,25 @@ class RQTransformer(nn.Module):
         self.spatial_pos_emb = nn.Embedding(max_spatial_seq_len, dim)
         self.depth_pos_emb = nn.Embedding(max_depth_seq_len, dim)
 
-        self.spatial_layers = nn.ModuleList([])
-        for _ in range(spatial_layers):
-            self.spatial_layers.append(nn.ModuleList([
-                Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = attn_dropout),
-                FeedForward(dim = dim, mult = ff_mult, dropout = ff_dropout)
-            ]))
+        self.spatial_transformer = Transformer(
+            dim = dim,
+            layers = spatial_layers,
+            dim_head = dim_head,
+            heads = heads,
+            attn_dropout = attn_dropout,
+            ff_dropout = ff_dropout,
+            ff_mult = ff_mult
+        )
 
-        self.depth_layers = nn.ModuleList([])
-        for _ in range(depth_layers):
-            self.depth_layers.append(nn.ModuleList([
-                Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = attn_dropout),
-                FeedForward(dim = dim, mult = ff_mult, dropout = ff_dropout)
-            ]))
+        self.depth_transformer = Transformer(
+            dim = dim,
+            layers = depth_layers,
+            dim_head = dim_head,
+            heads = heads,
+            attn_dropout = attn_dropout,
+            ff_dropout = ff_dropout,
+            ff_mult = ff_mult
+        )
 
         self.to_logits = nn.Linear(dim, num_tokens)
         self.pad_id = pad_id
@@ -138,9 +173,7 @@ class RQTransformer(nn.Module):
 
         spatial_tokens = spatial_tokens[:, :-1]
 
-        for attn, ff in self.spatial_layers:
-            spatial_tokens = attn(spatial_tokens) + spatial_tokens
-            spatial_tokens = ff(spatial_tokens) + spatial_tokens
+        spatial_tokens = self.spatial_transformer(spatial_tokens)
 
         spatial_tokens = rearrange(spatial_tokens, 'b s f -> b s 1 f')
 
@@ -151,9 +184,7 @@ class RQTransformer(nn.Module):
 
         depth_tokens = rearrange(depth_tokens, '... n d -> (...) n d')
 
-        for attn, ff in self.depth_layers:
-            depth_tokens = attn(depth_tokens) + depth_tokens
-            depth_tokens = ff(depth_tokens) + depth_tokens
+        depth_tokens = self.depth_transformer(depth_tokens)
 
         depth_tokens = rearrange(depth_tokens, '(b s) d f -> b s d f', b = b)
         logits = self.to_logits(depth_tokens)
