@@ -14,7 +14,7 @@ $ pip install RQ-transformer
 
 ```python
 import torch
-from rq_transformer.rq_transformer import RQTransformer
+from rq_transformer import RQTransformer
 
 model = RQTransformer(
     num_tokens = 16000,             # number of tokens, in the paper they had a codebook size of 16k
