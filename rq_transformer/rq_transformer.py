@@ -167,12 +167,12 @@ class RQTransformer(nn.Module):
         self.to_logits = nn.Linear(dim, num_tokens)
         self.pad_id = pad_id
 
-    def generate(self, prime = None, filter_thres = 0.9, temperature = 1.):
+    def generate(self, prime = None, filter_thres = 0.9, temperature = 1., default_batch_size = 1):
         total_seq_len = self.depth_seq_len * self.max_spatial_seq_len
         device = next(self.parameters()).device
 
         if not exists(prime):
-            prime = torch.empty((1, 0), dtype = torch.long, device = device)
+            prime = torch.empty((default_batch_size, 0), dtype = torch.long, device = device)
 
         seq = prime
 
