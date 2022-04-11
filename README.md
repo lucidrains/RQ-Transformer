@@ -47,7 +47,7 @@ sampled = model.generate(temperature = 0.9, filter_thres = 0.9) # (1, 1024, 4)
 ## Todo
 
 - [x] take care of sampling with generate method
-- [ ] extend to 3 nested dimensions, use separate class, name it `AxialAutoregressiveTransformer`
+- [ ] extend to 3 nested dimensions, use separate class, name it `AxialAutoregressiveTransformer` investigate it as a hierarchical autoregressive model
 
 ## Citations
 

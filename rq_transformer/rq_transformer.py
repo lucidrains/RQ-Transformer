@@ -60,7 +60,7 @@ class Attention(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(dim)
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
-        self.to_out = nn.Linear(inner_dim, dim)
+        self.to_out = nn.Linear(inner_dim, dim, bias = False)
 
     def forward(self, x):
         h, device = self.heads, x.device
