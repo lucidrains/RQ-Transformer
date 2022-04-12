@@ -79,11 +79,24 @@ class Alibi(nn.Module):
         self.register_buffer('bias', bias, persistent = False)
         return self.bias
 
+# norm
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps = 1e-8):
+        super().__init__()
+        self.scale = dim ** -0.5
+        self.eps = eps
+        self.g = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        norm = torch.norm(x, dim = -1, keepdim = True) * self.scale
+        return x / norm.clamp(min = self.eps) * self.g
+
 # helper classes
 
 def FeedForward(*, dim, mult = 4, dropout = 0.):
     return nn.Sequential(
-        nn.LayerNorm(dim),
+        RMSNorm(dim),
         nn.Linear(dim, dim * mult),
         nn.GELU(),
         nn.Dropout(dropout),
@@ -105,19 +118,20 @@ class Attention(nn.Module):
         inner_dim = dim_head * heads
 
         self.dropout = nn.Dropout(dropout)
-        self.norm = nn.LayerNorm(dim)
-        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
+        self.norm = RMSNorm(dim)
+        self.to_q = nn.Linear(dim, inner_dim, bias = False)
+        self.to_kv = nn.Linear(dim, dim_head * 2, bias = False)
         self.to_out = nn.Linear(inner_dim, dim, bias = False)
 
     def forward(self, x, attn_bias = None):
         h, device = self.heads, x.device
 
         x = self.norm(x)
-        q, k, v = self.to_qkv(x).chunk(3, dim = -1)
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
+        q, k, v = (self.to_q(x), *self.to_kv(x).chunk(2, dim = -1))
+        q = rearrange(q, 'b n (h d) -> b h n d', h = h)
 
         q = q * self.scale
-        sim = einsum('b h i d, b h j d -> b h i j', q, k)
+        sim = einsum('b h i d, b j d -> b h i j', q, k)
 
         if exists(attn_bias):
             sim = sim + attn_bias
@@ -131,7 +145,7 @@ class Attention(nn.Module):
         attn = sim.softmax(dim = -1)
         attn = self.dropout(attn)
 
-        out = einsum('b h i j, b h j d -> b h i d', attn, v)
+        out = einsum('b h i j, b j d -> b h i d', attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 
@@ -158,7 +172,7 @@ class Transformer(nn.Module):
                 FeedForward(dim = dim, mult = ff_mult, dropout = ff_dropout)
             ]))
 
-        self.norm = nn.LayerNorm(dim)
+        self.norm = RMSNorm(dim)
 
     def forward(self, x):
         n = x.shape[-2]
@@ -282,7 +296,7 @@ class HierarchicalCausalTransformer(nn.Module):
         # and adding the absolute positional embeddings
 
         tokens_at_stages = []
-        reduced_tokens = tokens.clone()
+        reduced_tokens = tokens
 
         for ind, pos_emb in zip(range(len(prec_dims)), reversed(self.pos_embs)):
             is_first = ind == 0
@@ -300,33 +314,36 @@ class HierarchicalCausalTransformer(nn.Module):
 
         # spatial tokens is tokens with depth pos reduced along depth dimension + spatial positions        
 
-        for stage_tokens, transformer in zip(tokens_at_stages, self.transformers):
+        for ind, (stage_tokens, transformer) in enumerate(zip(tokens_at_stages, self.transformers)):
+            is_last = ind == (self.stages - 1)
+
             stage_tokens = torch.cat((
                 start_tokens,
                 stage_tokens,
-            ), dim = -2)            
+            ), dim = -2)
 
             *prec_dims, _, _ = stage_tokens.shape
 
             stage_tokens = rearrange(stage_tokens, '... n d -> (...) n d')
-            attended = transformer(stage_tokens[:, :-1])
+            attended = transformer(stage_tokens)
             attended = rearrange_with_anon_dims(attended, '(...b) n d -> ...b n d', b = prec_dims)
 
-            start_tokens = rearrange(attended, '... n d -> ... n 1 d')
+            start_tokens = rearrange(attended[..., :-1, :], '... n d -> ... n 1 d')
 
         logits = self.to_logits(attended)
 
-        if flattened_dims:
-            logits = rearrange(logits, 'b ... n -> b (...) n')
-            logits = logits[:, :seq_len]
-
         if not return_loss:
+            logits = logits[..., 1:, :]
+
+            if flattened_dims:
+                logits = rearrange(logits, 'b ... n -> b (...) n')
+                logits = logits[:, :seq_len]
+
             return logits
 
+        logits = logits[..., :-1, :]
         preds = rearrange(logits, 'b ... c -> b c (...)')
-
         labels = rearrange(ids, 'b ... -> b (...)')
-        labels = labels[:, :preds.shape[-1]]
 
         loss = F.cross_entropy(preds, labels, ignore_index = self.pad_id)
         return loss

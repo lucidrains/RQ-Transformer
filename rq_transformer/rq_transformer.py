@@ -195,12 +195,13 @@ class RQTransformer(nn.Module):
 
     def forward(self, ids, return_loss = False):
         assert ids.ndim in {2, 3}
+        flattened_dim = ids.ndim == 2
         ids_orig_ndim = ids.ndim
 
         if ids.numel() == 0:
             return self.forward_empty(ids.shape[0])
 
-        if ids.ndim == 2:
+        if flattened_dim:
             # allow for ids to be given in the shape of (batch, seq)
             # in which case it will be auto-padded to the next nearest multiple of depth seq len
             seq_len = ids.shape[-1]
@@ -237,28 +238,28 @@ class RQTransformer(nn.Module):
         # spatial tokens become the start tokens of the depth dimension
 
         depth_tokens = torch.cat((spatial_tokens, tokens_with_depth_pos), dim = -2)
-        depth_tokens = depth_tokens[:, :, :-1]
 
         depth_tokens = rearrange(depth_tokens, '... n d -> (...) n d')
 
         depth_tokens = self.depth_transformer(depth_tokens)
 
         depth_tokens = rearrange(depth_tokens, '(b s) d f -> b s d f', b = b)
+
         logits = self.to_logits(depth_tokens)
 
-        if ids_orig_ndim == 2:
-            logits = rearrange(logits, 'b ... n -> b (...) n')
-            logits = logits[:, :seq_len]
-
         if not return_loss:
+            logits = logits[..., 1:, :]
+
+            if flattened_dim:
+                logits = rearrange(logits, 'b ... n -> b (...) n')
+                logits = logits[:, :seq_len]
+
             return logits
 
-        assert self.training
-
+        logits = logits[..., :-1, :]
         preds = rearrange(logits, 'b ... c -> b c (...)')
 
         labels = rearrange(ids, 'b s d -> b (s d)')
-        labels = labels[:, :preds.shape[-1]]
 
         loss = F.cross_entropy(preds, labels, ignore_index = self.pad_id)
         return loss
