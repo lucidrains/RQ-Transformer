@@ -69,11 +69,6 @@ loss.backward()
 sampled = model.generate(temperature = 0.9, filter_thres = 0.9) # (1, 16, 4, 5)
 ```
 
-## Todo
-
-- [x] take care of sampling with generate method
-- [x] generalize to any number of preceding dimension (full hierarchical or axial autoregressive transformer)
-
 ## Citations
 
 ```bibtex
@@ -82,5 +77,14 @@ sampled = model.generate(temperature = 0.9, filter_thres = 0.9) # (1, 16, 4, 5)
     year    = {2022},
     month   = {03},
     title   = {Autoregressive Image Generation using Residual Quantization}
+}
+```
+
+```bibtex
+@misc{press2021ALiBi,
+    title   = {Train Short, Test Long: Attention with Linear Biases Enable Input Length Extrapolation},
+    author  = {Ofir Press and Noah A. Smith and Mike Lewis},
+    year    = {2021},
+    url     = {https://ofir.io/train_short_test_long.pdf}
 }
 ```

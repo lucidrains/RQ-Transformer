@@ -1,3 +1,4 @@
+import math
 import functools
 import torch
 import torch.nn.functional as F
@@ -43,6 +44,41 @@ def top_k(logits, thres = 0.5):
     probs.scatter_(1, ind, val)
     return probs
 
+# positional bias
+
+class Alibi(nn.Module):
+    def __init__(self, heads, **kwargs):
+        super().__init__()
+        self.heads = heads
+        slopes = torch.Tensor(self._get_slopes(heads))
+        slopes = rearrange(slopes, 'h -> h 1 1')
+        self.register_buffer('slopes', slopes, persistent = False)
+        self.register_buffer('bias', None, persistent = False)
+
+    @staticmethod
+    def _get_slopes(heads):
+        def get_slopes_power_of_2(n):
+            start = (2**(-2**-(math.log2(n)-3)))
+            ratio = start
+            return [start*ratio**i for i in range(n)]
+
+        if math.log2(heads).is_integer():
+            return get_slopes_power_of_2(heads)
+
+        closest_power_of_2 = 2 ** math.floor(math.log2(heads))
+        return get_slopes_power_of_2(closest_power_of_2) + get_slopes_power_of_2(2 * closest_power_of_2)[0::2][:heads-closest_power_of_2]
+
+    def forward(self, i, j, device):
+        if exists(self.bias) and self.bias.shape[-1] >= j:
+            return self.bias[..., :j]
+
+        bias = torch.arange(j, device = device)
+        bias = rearrange(bias, 'j -> 1 1 j')
+        bias = bias * self.slopes
+
+        self.register_buffer('bias', bias, persistent = False)
+        return self.bias
+
 # helper classes
 
 def FeedForward(*, dim, mult = 4, dropout = 0.):
@@ -73,7 +109,7 @@ class Attention(nn.Module):
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
         self.to_out = nn.Linear(inner_dim, dim, bias = False)
 
-    def forward(self, x):
+    def forward(self, x, attn_bias = None):
         h, device = self.heads, x.device
 
         x = self.norm(x)
@@ -82,6 +118,9 @@ class Attention(nn.Module):
 
         q = q * self.scale
         sim = einsum('b h i d, b h j d -> b h i j', q, k)
+
+        if exists(attn_bias):
+            sim = sim + attn_bias
 
         i, j = sim.shape[-2:]
         mask_value = -torch.finfo(sim.dtype).max
@@ -106,10 +145,13 @@ class Transformer(nn.Module):
         heads = 8,
         attn_dropout = 0.,
         ff_dropout = 0.,
-        ff_mult = 4
+        ff_mult = 4,
+        rel_pos_bias = True
     ):
         super().__init__()
+        self.alibi = Alibi(heads = heads) if rel_pos_bias else None
         self.layers = nn.ModuleList([])
+
         for _ in range(layers):
             self.layers.append(nn.ModuleList([
                 Attention(dim = dim, dim_head = dim_head, heads = heads, dropout = attn_dropout),
@@ -119,8 +161,11 @@ class Transformer(nn.Module):
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, x):
+        n = x.shape[-2]
+        attn_bias = self.alibi(n, n, device = x.device) if exists(self.alibi) else None
+
         for attn, ff in self.layers:
-            x = attn(x) + x
+            x = attn(x, attn_bias = attn_bias) + x
             x = ff(x) + x
 
         return self.norm(x)
@@ -140,7 +185,8 @@ class HierarchicalCausalTransformer(nn.Module):
         attn_dropout = 0.,
         ff_mult = 4,
         ff_dropout = 0.,
-        pad_id = 0
+        pad_id = 0,
+        rel_pos_bias = True
     ):
         super().__init__()
 
@@ -169,7 +215,8 @@ class HierarchicalCausalTransformer(nn.Module):
                 heads = heads,
                 attn_dropout = attn_dropout,
                 ff_dropout = ff_dropout,
-                ff_mult = ff_mult
+                ff_mult = ff_mult,
+                rel_pos_bias = rel_pos_bias
             ))
 
         self.to_logits = nn.Linear(dim, num_tokens)

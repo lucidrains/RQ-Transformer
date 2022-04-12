@@ -102,5 +102,5 @@ for i in tqdm.tqdm(range(NUM_BATCHES), mininterval=10., desc='training'):
         sample = model.generate(prime_inp[None, :])
         sample = sample.flatten(1)
 
-        output_str = decode_tokens(sample[0])
+        output_str = decode_tokens(sample[0][PRIME_LEN:])
         print(output_str)
