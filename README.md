@@ -63,6 +63,10 @@ x = torch.randint(0, 16000, (1, 10, 4, 5)).cuda()
 
 loss = model(x, return_loss = True)
 loss.backward()
+
+# after a lot training
+
+sampled = model.generate(temperature = 0.9, filter_thres = 0.9) # (1, 16, 4, 5)
 ```
 
 ## Todo
