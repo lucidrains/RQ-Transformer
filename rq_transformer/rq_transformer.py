@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch import nn, einsum
+
 from einops import rearrange, reduce, repeat
 
 # helpers
@@ -141,7 +142,7 @@ class RQTransformer(nn.Module):
         self.token_emb = nn.Embedding(num_tokens, dim)
         self.spatial_start_token = nn.Parameter(torch.randn(dim))
 
-        self.spatial_pos_emb = nn.Embedding(max_spatial_seq_len, dim)
+        self.spatial_pos_emb = nn.Embedding(max_spatial_seq_len + 1, dim) # account for a boundary case
         self.depth_pos_emb = nn.Embedding(depth_seq_len, dim)
 
         self.spatial_transformer = Transformer(
@@ -208,10 +209,18 @@ class RQTransformer(nn.Module):
             padding = remainder_to_mult(seq_len, self.depth_seq_len)
             ids = F.pad(ids, (0, padding), value = self.pad_id)
             ids = rearrange(ids, 'b (s d) -> b s d', d = self.depth_seq_len)
+        else:
+            seq_len = ids.shape[1] * ids.shape[2]
+
+        # bump space by one to account for a boundary case
+
+        ids = F.pad(ids, (0, 0, 0, 1))
 
         b, space, depth, device = *ids.shape, ids.device
-        assert space <= self.max_spatial_seq_len, 'spatial dimension is greater than the max_spatial_seq_len set'
+        assert space <= (self.max_spatial_seq_len + 1), 'spatial dimension is greater than the max_spatial_seq_len set'
         assert depth == self.depth_seq_len, 'depth dimension must be equal to depth_seq_len'
+
+        # get token embeddings
 
         tokens = self.token_emb(ids)
 
@@ -248,13 +257,16 @@ class RQTransformer(nn.Module):
         logits = self.to_logits(depth_tokens)
 
         if not return_loss:
-            logits = logits[..., 1:, :]
+            logits = logits[..., :-1, :]
+
+            logits = rearrange(logits, 'b ... n -> b (...) n')
+
+            logits = logits[:, 1:(seq_len + 1)] # exclude first start token
 
             if flattened_dim:
-                logits = rearrange(logits, 'b ... n -> b (...) n')
-                logits = logits[:, :seq_len]
+                return logits
 
-            return logits
+            return rearrange(logits, 'b (s d) n -> b s d n', d = depth)
 
         logits = logits[..., :-1, :]
         preds = rearrange(logits, 'b ... c -> b c (...)')
