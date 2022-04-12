@@ -38,8 +38,8 @@ def decode_tokens(tokens):
 model = HierarchicalCausalTransformer(
     num_tokens = 256,
     dim = 512,
-    depth = (5, 4, 4),
-    max_seq_len = (16, 8, 8)
+    depth = (4, 3, 3, 3),
+    max_seq_len = (4, 4, 8, 8)
 ).cuda()
 
 # prepare enwik8 data

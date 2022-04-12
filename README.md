@@ -69,6 +69,10 @@ loss.backward()
 sampled = model.generate(temperature = 0.9, filter_thres = 0.9) # (1, 16, 4, 5)
 ```
 
+## Todo
+
+- [ ] move hierarchical causal transformer to separate repository, seems to be working
+
 ## Citations
 
 ```bibtex
