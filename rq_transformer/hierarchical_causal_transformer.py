@@ -332,8 +332,9 @@ class HierarchicalCausalTransformer(nn.Module):
 
         logits = self.to_logits(attended)
 
+        logits = logits[..., 1:, :]
+
         if not return_loss:
-            logits = logits[..., 1:, :]
 
             if flattened_dims:
                 logits = rearrange(logits, 'b ... n -> b (...) n')
@@ -341,9 +342,12 @@ class HierarchicalCausalTransformer(nn.Module):
 
             return logits
 
-        logits = logits[..., :-1, :]
         preds = rearrange(logits, 'b ... c -> b c (...)')
         labels = rearrange(ids, 'b ... -> b (...)')
 
-        loss = F.cross_entropy(preds, labels, ignore_index = self.pad_id)
+        loss = F.cross_entropy(
+            preds[..., :-1],
+            labels[..., 1:],
+            ignore_index = self.pad_id
+        )
         return loss
