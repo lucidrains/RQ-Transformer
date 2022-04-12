@@ -276,8 +276,6 @@ class HierarchicalCausalTransformer(nn.Module):
         if not return_loss:
             return logits
 
-        assert self.training
-
         preds = rearrange(logits, 'b ... c -> b c (...)')
 
         labels = rearrange(ids, 'b ... -> b (...)')
