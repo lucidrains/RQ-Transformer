@@ -176,7 +176,7 @@ class HierarchicalCausalTransformer(nn.Module):
         self.pad_id = pad_id
 
     def generate(self, prime = None, filter_thres = 0.9, temperature = 1., default_batch_size = 1):
-        total_seq_len = self.depth_seq_len * self.max_spatial_seq_len
+        total_seq_len = reduce_mult(self.max_seq_len)
         device = next(self.parameters()).device
 
         if not exists(prime):
@@ -190,13 +190,13 @@ class HierarchicalCausalTransformer(nn.Module):
             sampled = gumbel_sample(logits, dim = -1, temperature = temperature)
             seq = torch.cat((seq, rearrange(sampled, 'b -> b 1')), dim = -1)
 
-        return rearrange(seq, 'b (s d) -> b s d', d = self.depth_seq_len)
+        return rearrange_with_anon_dims(seq, 'b (...d) -> b ...d', d = self.max_seq_len)
 
     def forward_empty(self, batch_size):
         # take care of special case
         # where you sample from input of 0 (start token only)
 
-        tokens = repeat(self.start_token, 'd -> b 1 d', b = batch_size)
+        tokens = repeat(self.start_tokens, 'd -> b 1 d', b = batch_size)
 
         for transformer in self.transformers:
             tokens = transformer(tokens)
