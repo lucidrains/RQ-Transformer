@@ -44,10 +44,31 @@ logits = model(x)
 sampled = model.generate(temperature = 0.9, filter_thres = 0.9) # (1, 1024, 4)
 ```
 
+I also think there is something deeper going on, and have generalized this to any number of dimensions. You can use it by importing the `HierarchicalCausalTransformer`
+
+```python
+import torch
+from rq_transformer import HierarchicalCausalTransformer
+
+model = HierarchicalCausalTransformer(
+    num_tokens = 16000,                   # number of tokens
+    dim = 512,                            # feature dimension
+    dim_head = 64,                        # dimension of attention heads
+    heads = 8,                            # number of attention heads
+    depth = (4, 4, 2),                    # 3 stages (but can be any number) - transformer of depths 4, 4, 2
+    max_seq_len = (16, 4, 5)              # the maximum sequence length of first, stage, then the fixed sequence length of all subsequent stages
+).cuda()
+
+x = torch.randint(0, 16000, (1, 10, 4, 5)).cuda()
+
+loss = model(x, return_loss = True)
+loss.backward()
+```
+
 ## Todo
 
 - [x] take care of sampling with generate method
-- [ ] extend to 3 nested dimensions, use separate class, name it `AxialAutoregressiveTransformer` investigate it as a hierarchical autoregressive model
+- [x] generalize to any number of preceding dimension (full hierarchical or axial autoregressive transformer)
 
 ## Citations
 

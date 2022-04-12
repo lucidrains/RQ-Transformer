@@ -1,6 +1,9 @@
+import functools
 import torch
 import torch.nn.functional as F
 from torch import nn, einsum
+
+from einops_exts import rearrange_with_anon_dims
 from einops import rearrange, reduce, repeat
 
 # helpers
@@ -13,6 +16,14 @@ def default(val, d):
 
 def remainder_to_mult(num, mult):
     return (mult - num % mult) % mult
+
+def cast_tuple(t, length = 1):
+    return t if isinstance(t, tuple) else ((t,) * length)
+
+def reduce_mult(nums):
+    return functools.reduce(lambda x, y: x * y, nums, 1)
+
+# tensor helpers
 
 def log(t, eps = 1e-20):
     return torch.log(t.clamp(min = eps))
@@ -122,10 +133,8 @@ class HierarchicalCausalTransformer(nn.Module):
         *,
         num_tokens,
         dim,
-        max_spatial_seq_len,
-        depth_seq_len,
-        spatial_layers,
-        depth_layers,
+        depth,
+        max_seq_len,
         dim_head = 64,
         heads = 8,
         attn_dropout = 0.,
@@ -134,35 +143,34 @@ class HierarchicalCausalTransformer(nn.Module):
         pad_id = 0
     ):
         super().__init__()
-        self.dim = dim
-        self.max_spatial_seq_len = max_spatial_seq_len
-        self.depth_seq_len = depth_seq_len
+
+        # simplified configuration for each stage of the hierarchy
+        # depth = (2, 2, 4) would translate to depth 2 at first stage, depth 2 second stage, depth 4 third
+        # max_seq_len = (16, 8, 4) would translate to max sequence length of 16 at first stage, length of 8 at second stage, length of 4 for last
+
+        assert isinstance(depth, tuple) and isinstance(max_seq_len, tuple)
+        assert len(depth) == len(max_seq_len)
+
+        self.stages = len(depth)
 
         self.token_emb = nn.Embedding(num_tokens, dim)
-        self.spatial_start_token = nn.Parameter(torch.randn(dim))
+        self.start_tokens = nn.Parameter(torch.randn(dim))
 
-        self.spatial_pos_emb = nn.Embedding(max_spatial_seq_len, dim)
-        self.depth_pos_emb = nn.Embedding(depth_seq_len, dim)
+        self.max_seq_len = max_seq_len
+        self.pos_embs = nn.ModuleList([nn.Embedding(seq_len, dim) for seq_len in max_seq_len])
 
-        self.spatial_transformer = Transformer(
-            dim = dim,
-            layers = spatial_layers,
-            dim_head = dim_head,
-            heads = heads,
-            attn_dropout = attn_dropout,
-            ff_dropout = ff_dropout,
-            ff_mult = ff_mult
-        )
+        self.transformers = nn.ModuleList([])
 
-        self.depth_transformer = Transformer(
-            dim = dim,
-            layers = depth_layers,
-            dim_head = dim_head,
-            heads = heads,
-            attn_dropout = attn_dropout,
-            ff_dropout = ff_dropout,
-            ff_mult = ff_mult
-        )
+        for stage_depth in depth:
+            self.transformers.append(Transformer(
+                dim = dim,
+                layers = stage_depth,
+                dim_head = dim_head,
+                heads = heads,
+                attn_dropout = attn_dropout,
+                ff_dropout = ff_dropout,
+                ff_mult = ff_mult
+            ))
 
         self.to_logits = nn.Linear(dim, num_tokens)
         self.pad_id = pad_id
@@ -188,65 +196,80 @@ class HierarchicalCausalTransformer(nn.Module):
         # take care of special case
         # where you sample from input of 0 (start token only)
 
-        spatial_tokens = repeat(self.spatial_start_token, 'd -> b 1 d', b = batch_size)
-        depth_tokens = self.spatial_transformer(spatial_tokens)
-        depth_tokens = self.depth_transformer(depth_tokens)
-        return self.to_logits(depth_tokens)
+        tokens = repeat(self.start_token, 'd -> b 1 d', b = batch_size)
+
+        for transformer in self.transformers:
+            tokens = transformer(tokens)
+
+        return self.to_logits(tokens)
 
     def forward(self, ids, return_loss = False):
-        assert ids.ndim in {2, 3}
+        assert ids.ndim in {2, self.stages + 1}
+        flattened_dims = ids.ndim == 2
         ids_orig_ndim = ids.ndim
 
         if ids.numel() == 0:
             return self.forward_empty(ids.shape[0])
 
-        if ids.ndim == 2:
+        if flattened_dims:
             # allow for ids to be given in the shape of (batch, seq)
             # in which case it will be auto-padded to the next nearest multiple of depth seq len
             seq_len = ids.shape[-1]
-            padding = remainder_to_mult(seq_len, self.depth_seq_len)
+            multiple_of = reduce_mult(self.max_seq_len[1:])
+            padding = remainder_to_mult(seq_len, multiple_of)
             ids = F.pad(ids, (0, padding), value = self.pad_id)
-            ids = rearrange(ids, 'b (s d) -> b s d', d = self.depth_seq_len)
+            ids = rearrange_with_anon_dims(ids, 'b (l ...d) -> b l ...d', d = self.max_seq_len[1:])
 
-        b, space, depth, device = *ids.shape, ids.device
-        assert space <= self.max_spatial_seq_len, 'spatial dimension is greater than the max_spatial_seq_len set'
-        assert depth == self.depth_seq_len, 'depth dimension must be equal to depth_seq_len'
+        b, *prec_dims, device = *ids.shape, ids.device
+
+        # check some dimensions
+
+        assert prec_dims[0] <= self.max_seq_len[0], 'the first dimension of your axial autoregressive transformer must be less than the first tuple element of max_seq_len (like any autoregressive transformer)'
+        assert tuple(prec_dims[1:]) == tuple(self.max_seq_len[1:]), 'all subsequent dimensions must match exactly'
+
+        # get token embeddings
 
         tokens = self.token_emb(ids)
 
-        spatial_pos = self.spatial_pos_emb(torch.arange(space, device = device))
-        depth_pos = self.depth_pos_emb(torch.arange(depth, device = device))
+        # get tokens for all hierarchical stages, reducing by appropriate dimensions
+        # and adding the absolute positional embeddings
 
-        tokens_with_depth_pos = tokens + depth_pos
+        tokens_at_stages = []
+        reduced_tokens = tokens.clone()
 
-        # spatial tokens is tokens with depth pos reduced along depth dimension + spatial positions
+        for ind, pos_emb in zip(range(len(prec_dims)), reversed(self.pos_embs)):
+            is_first = ind == 0
 
-        spatial_tokens = reduce(tokens_with_depth_pos, 'b s d f -> b s f', 'sum') + spatial_pos
+            if not is_first:
+                reduced_tokens = reduce(reduced_tokens, 'b ... r d -> b ... d', 'sum')
 
-        spatial_tokens = torch.cat((
-            repeat(self.spatial_start_token, 'f -> b 1 f', b = b),
-            spatial_tokens
-        ), dim = -2)
+            positions = pos_emb(torch.arange(reduced_tokens.shape[-2], device = device))
+            tokens_with_position = reduced_tokens + positions
+            tokens_at_stages.insert(0, tokens_with_position)
 
-        spatial_tokens = spatial_tokens[:, :-1]
+        # get start tokens and append to the coarsest stage
 
-        spatial_tokens = self.spatial_transformer(spatial_tokens)
+        start_tokens = repeat(self.start_tokens, 'f -> b 1 f', b = b)
 
-        spatial_tokens = rearrange(spatial_tokens, 'b s f -> b s 1 f')
+        # spatial tokens is tokens with depth pos reduced along depth dimension + spatial positions        
 
-        # spatial tokens become the start tokens of the depth dimension
+        for stage_tokens, transformer in zip(tokens_at_stages, self.transformers):
+            stage_tokens = torch.cat((
+                start_tokens,
+                stage_tokens,
+            ), dim = -2)            
 
-        depth_tokens = torch.cat((spatial_tokens, tokens_with_depth_pos), dim = -2)
-        depth_tokens = depth_tokens[:, :, :-1]
+            *prec_dims, _, _ = stage_tokens.shape
 
-        depth_tokens = rearrange(depth_tokens, '... n d -> (...) n d')
+            stage_tokens = rearrange(stage_tokens, '... n d -> (...) n d')
+            attended = transformer(stage_tokens[:, :-1])
+            attended = rearrange_with_anon_dims(attended, '(...b) n d -> ...b n d', b = prec_dims)
 
-        depth_tokens = self.depth_transformer(depth_tokens)
+            start_tokens = rearrange(attended, '... n d -> ... n 1 d')
 
-        depth_tokens = rearrange(depth_tokens, '(b s) d f -> b s d f', b = b)
-        logits = self.to_logits(depth_tokens)
+        logits = self.to_logits(attended)
 
-        if ids_orig_ndim == 2:
+        if flattened_dims:
             logits = rearrange(logits, 'b ... n -> b (...) n')
             logits = logits[:, :seq_len]
 
@@ -257,7 +280,7 @@ class HierarchicalCausalTransformer(nn.Module):
 
         preds = rearrange(logits, 'b ... c -> b c (...)')
 
-        labels = rearrange(ids, 'b s d -> b (s d)')
+        labels = rearrange(ids, 'b ... -> b (...)')
         labels = labels[:, :preds.shape[-1]]
 
         loss = F.cross_entropy(preds, labels, ignore_index = self.pad_id)
