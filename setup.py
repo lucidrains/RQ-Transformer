@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'RQ-transformer',
   packages = find_packages(exclude=[]),
-  version = '0.1.8',
+  version = '0.1.9',
   license='MIT',
   description = 'RQ Transformer - Autoregressive Transformer for Residual Quantized Codes',
   author = 'Phil Wang',

@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, einsum
 
+from einops_exts import rearrange_with_anon_dims
 from einops import rearrange, reduce, repeat
 
 # helpers
@@ -212,10 +213,6 @@ class RQTransformer(nn.Module):
         else:
             seq_len = ids.shape[1] * ids.shape[2]
 
-        # bump space by one to account for a boundary case
-
-        ids = F.pad(ids, (0, 0, 0, 1))
-
         b, space, depth, device = *ids.shape, ids.device
         assert space <= (self.max_spatial_seq_len + 1), 'spatial dimension is greater than the max_spatial_seq_len set'
         assert depth == self.depth_seq_len, 'depth dimension must be equal to depth_seq_len'
@@ -236,15 +233,15 @@ class RQTransformer(nn.Module):
         spatial_tokens = torch.cat((
             repeat(self.spatial_start_token, 'f -> b 1 f', b = b),
             spatial_tokens
-        ), dim = -2)
-
-        spatial_tokens = spatial_tokens[:, :-1]
+        ), dim = -2)        
 
         spatial_tokens = self.spatial_transformer(spatial_tokens)
 
         spatial_tokens = rearrange(spatial_tokens, 'b s f -> b s 1 f')
 
         # spatial tokens become the start tokens of the depth dimension
+
+        tokens_with_depth_pos = F.pad(tokens_with_depth_pos, (0, 0, 0, 0, 0, 1), value = 0.)
 
         depth_tokens = torch.cat((spatial_tokens, tokens_with_depth_pos), dim = -2)
 
@@ -255,22 +252,20 @@ class RQTransformer(nn.Module):
         depth_tokens = rearrange(depth_tokens, '(b s) d f -> b s d f', b = b)
 
         logits = self.to_logits(depth_tokens)
+        logits = rearrange(logits, 'b ... f -> b (...) f')
+        logits = logits[:, :(seq_len + 1)]
 
         if not return_loss:
-            logits = logits[..., :-1, :]
-
-            logits = rearrange(logits, 'b ... n -> b (...) n')
-
-            logits = logits[:, 1:(seq_len + 1)] # exclude first start token
+            logits = logits[:, 1:]
 
             if flattened_dim:
-                return logits
+                return rearrange(logits, 'b ... n -> b (...) n')
 
-            return rearrange(logits, 'b (s d) n -> b s d n', d = depth)
+            return logits
 
-        logits = logits[..., :-1, :]
+        logits = logits[:, :-1]
+        
         preds = rearrange(logits, 'b ... c -> b c (...)')
-
         labels = rearrange(ids, 'b s d -> b (s d)')
 
         loss = F.cross_entropy(preds, labels, ignore_index = self.pad_id)
